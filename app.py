@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import random
 
-st.title("シフト自動作成アプリ（完全版）")
+st.title("シフト自動作成アプリ（最終版・単発修正版）")
 
 # ---------------------------
 # スタッフ人数
@@ -25,51 +25,27 @@ for h in hours:
     required[h] = st.number_input(f"{h}時", 0, num_staff, 3, key=f"req_{h}")
 
 # ---------------------------
-# 勤務希望・休憩希望（タブUI）
+# タブで勤務希望・休憩希望
 # ---------------------------
+tabs = st.tabs(staff_names)
 work_df = pd.DataFrame(0, index=staff_names, columns=hours)
 break_df = pd.DataFrame(0, index=staff_names, columns=hours)
 
-st.subheader("勤務希望／休憩希望（スタッフごとにタブ）")
-
-tabs = st.tabs(staff_names)
-
 for i, staff in enumerate(staff_names):
     with tabs[i]:
-        st.subheader(f"{staff}")
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.write("勤務希望")
-            for h in hours:
-                work_df.loc[staff, h] = 1 if st.checkbox(
-                    f"{h:02d}時", key=f"w_{staff}_{h}"
-                ) else 0
-
-        with col2:
-            st.write("休憩希望")
-            for h in hours:
-                break_df.loc[staff, h] = 1 if st.checkbox(
-                    f"{h:02d}時", key=f"b_{staff}_{h}"
-                ) else 0
+        cols = st.columns([1]*12 + [0.2] + [1]*12)  # 24時間＋休憩スペース
+        st.write(f"--- {staff} ---")
+        for h in hours:
+            col = cols[h] if h < 12 else cols[h+1]  # 12時間目以降は列ずらす
+            with col:
+                work_df.loc[staff, h] = 1 if st.checkbox(f"{h}時勤務", key=f"w_{staff}_{h}") else 0
+                break_df.loc[staff, h] = 1 if st.checkbox(f"{h}時休憩", key=f"b_{staff}_{h}") else 0
 
 # ---------------------------
-# シフト自動作成処理
+# 実行
 # ---------------------------
-def remove_singletons(df):
-    for s in df.index:
-        h = 0
-        while h < 24:
-            if df.loc[s, h] == 1:
-                start = h
-                while h < 24 and df.loc[s, h] == 1:
-                    h += 1
-                if h - start == 1:
-                    df.loc[s, start] = 0
-            else:
-                h += 1
-
 if st.button("実行"):
+
     schedule = work_df.copy()
 
     # ① 休憩反映
@@ -78,77 +54,80 @@ if st.button("実行"):
             if break_df.loc[s, h] == 1:
                 schedule.loc[s, h] = 0
 
-    # ② 人数調整（人数合わせ）
-    for h in hours:
-        current = schedule[h].sum()
-        need = required[h]
+    # ---------------------------
+    # 人数調整関数
+    # ---------------------------
+    def adjust_staff(schedule, required, max_hours):
+        for h in hours:
+            current = schedule[h].sum()
+            need = required[h]
+            if current < need:
+                candidates = [
+                    s for s in staff_names
+                    if schedule.loc[s, h] == 0 and break_df.loc[s, h] == 0
+                    and schedule.loc[s].sum() < max_hours
+                ]
+                random.shuffle(candidates)
+                for s in candidates:
+                    if current >= need:
+                        break
+                    schedule.loc[s, h] = 1
+                    current += 1
+            elif current > need:
+                candidates = [s for s in staff_names if schedule.loc[s, h] == 1]
+                random.shuffle(candidates)
+                for s in candidates:
+                    if current <= need:
+                        break
+                    schedule.loc[s, h] = 0
+                    current -= 1
+        return schedule
 
-        if current < need:
-            candidates = [s for s in staff_names
-                          if schedule.loc[s, h] == 0
-                          and break_df.loc[s, h] == 0
-                          and schedule.loc[s].sum() < max_hours]
-            random.shuffle(candidates)
-            for s in candidates:
-                if current >= need:
-                    break
-                schedule.loc[s, h] = 1
-                current += 1
-        elif current > need:
-            candidates = [s for s in staff_names if schedule.loc[s, h] == 1]
-            random.shuffle(candidates)
-            for s in candidates:
-                if current <= need:
-                    break
-                schedule.loc[s, h] = 0
-                current -= 1
+    # ② 人数調整（2回）
+    schedule = adjust_staff(schedule, required, max_hours)
+    schedule = adjust_staff(schedule, required, max_hours)
 
-    # ③ 単発除去
-    remove_singletons(schedule)
+    # ③ 単発勤務を連続に変換
+    def remove_single(schedule):
+        for s in staff_names:
+            h = 0
+            while h < 24:
+                if schedule.loc[s, h] == 1:
+                    start = h
+                    while h < 24 and schedule.loc[s, h] == 1:
+                        h += 1
+                    if h - start == 1:
+                        # 単発を前後にくっつける
+                        if start > 0 and schedule.loc[s, start-1] == 1:
+                            schedule.loc[s, start] = 1
+                        elif start < 23 and schedule.loc[s, start+1] == 1:
+                            schedule.loc[s, start] = 1
+                        else:
+                            # 空き時間に2時間セットで補填
+                            if start < 23 and schedule.loc[s, start+1] == 0:
+                                schedule.loc[s, start] = 1
+                                schedule.loc[s, start+1] = 1
+                            elif start > 0 and schedule.loc[s, start-1] == 0:
+                                schedule.loc[s, start-1] = 1
+                                schedule.loc[s, start] = 1
+                            else:
+                                schedule.loc[s, start] = 1
+                else:
+                    h += 1
+        return schedule
+
+    schedule = remove_single(schedule)
 
     # ④ 指定時間帯に必ず休憩
-    target_ranges = [
-        [11, 12, 13],
-        [17, 18, 19, 20]
-    ]
+    target_ranges = [[11,12,13],[17,18,19,20]]
     for s in staff_names:
         for tr in target_ranges:
-            if all(schedule.loc[s, h] == 1 for h in tr):
+            if all(schedule.loc[s, h]==1 for h in tr):
                 h = random.choice(tr)
                 schedule.loc[s, h] = 0
 
-    # ⑤ 再度単発除去
-    remove_singletons(schedule)
-
-    # ⑥ 最終微調整（連続シフトで人数不足補填）
-    for h in hours:
-        current = schedule[h].sum()
-        need = required[h]
-        if current < need:
-            candidates = [s for s in staff_names
-                          if schedule.loc[s, h] == 0
-                          and break_df.loc[s, h] == 0
-                          and schedule.loc[s].sum() < max_hours]
-            random.shuffle(candidates)
-            for s in candidates:
-                if current >= need:
-                    break
-                # 前後とつなげて連続勤務
-                if h > 0 and schedule.loc[s, h-1] == 1:
-                    schedule.loc[s, h] = 1
-                    current += 1
-                elif h < 23 and schedule.loc[s, h+1] == 1:
-                    schedule.loc[s, h] = 1
-                    current += 1
-                else:
-                    schedule.loc[s, h] = 1
-                    current += 1
-
-    # ⑦ 最終単発除去
-    remove_singletons(schedule)
-
-    # ⑧ 列順修正
-    schedule = schedule[sorted(schedule.columns)]
+    # ⑤ 最終人数調整
+    schedule = adjust_staff(schedule, required, max_hours)
 
     # ---------------------------
     # チェック
@@ -168,20 +147,26 @@ if st.button("実行"):
 
     # ---------------------------
     # 勤務時間
+    # ---------------------------
     st.subheader("勤務時間")
     st.dataframe(schedule.sum(axis=1).rename("勤務時間"))
 
     # ---------------------------
     # シフト表（ビジュアル）
+    # ---------------------------
     st.subheader("シフト表（ビジュアル）")
     display_df = schedule.copy()
     display_df.columns = [f"{h:02d}" for h in hours]
     display_df.index.name = "スタッフ"
 
+    # 色付け
     def color_map(val):
-        return "background-color: #F6A068" if val == 1 else "background-color: #FFEEDB"
+        if val==1:
+            return "background-color: #F6A068"  # 勤務
+        else:
+            return "background-color: #FFEEDB"  # 休憩
 
     styled = display_df.style.map(color_map)
     styled = styled.format(lambda x: "")
-    styled = styled.set_properties(**{"border": "2px solid #999", "text-align": "center"})
+    styled = styled.set_properties(**{"border":"2px solid #999","text-align":"center"})
     st.dataframe(styled, use_container_width=True)
